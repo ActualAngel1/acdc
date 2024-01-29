@@ -6,7 +6,7 @@ Currently it only supports disassembling user defined functions when compiling w
 Next features:
 ---
 - Detecting functions using my own cool algo I will explain later.
-- Divition into Basic-Blocks.
+- Disition into Basic-Blocks.
 - Start working on dataflow analysis.
 
-  And much more :D
+- And much more :D
