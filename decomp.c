@@ -1,27 +1,36 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <fcntl.h>
 #include <libelf.h>
 #include <gelf.h>
 #include <capstone/capstone.h>
 
-void disassemble_function(char *code, size_t size, uint64_t address, csh handle, Elf *elf, GElf_Shdr sym_shdr) {
+// Struct to store information about a function
+typedef struct {
+    char *name;
+    uint64_t start_address;
+    uint64_t end_address;
+    size_t length;
+    cs_insn *instructions;  // Array to store disassembled instructions
+} _function;
+
+void disassemble_function(char *code, size_t size, uint64_t section_base, uint64_t func_offset, csh handle, Elf *elf, GElf_Shdr sym_shdr, _function *function) {
     cs_insn *insn;
     size_t count;
 
-    count = cs_disasm(handle, code, size, address, 0, &insn);
+    count = cs_disasm(handle, code, size, section_base + func_offset, 0, &insn);
     if (count > 0) {
-        printf("0x%lx:\n", address);
-        for (size_t j = 0; j < count; j++) {
-            printf("\t%s\t\t%s\n", insn[j].mnemonic, insn[j].op_str);
-        }
-
-        cs_free(insn, count);
+        // Save function details in the struct
+        function->start_address = section_base + func_offset;  // Use sh_addr of the section
+        function->end_address = section_base + func_offset + size;  // Correct calculation for end address
+        function->length = count;
+        function->instructions = insn;
     } else {
         fprintf(stderr, "Failed to disassemble the function\n");
     }
 }
 
-void disassemble_section(Elf *elf, Elf_Scn *scn, csh handle) {
+void disassemble_section(Elf *elf, Elf_Scn *scn, csh handle, _function *functions, size_t *num_functions) {
     GElf_Ehdr ehdr;
     gelf_getehdr(elf, &ehdr);
 
@@ -79,8 +88,15 @@ void disassemble_section(Elf *elf, Elf_Scn *scn, csh handle) {
                             // Allocate a separate buffer for the current function's code
                             char *func_code = section_code + func_offset;
 
-                            disassemble_function(func_code, func_size, address + shdr.sh_addr, handle, elf, sym_shdr);
-                            printf("\n");
+                            // Create a function struct to store information
+                            _function *function = &functions[*num_functions];
+                            function->name = function_name;
+                            function->instructions = NULL;  // This will be set in disassemble_function
+
+                            disassemble_function(func_code, func_size, shdr.sh_addr, func_offset, handle, elf, sym_shdr, function);
+
+                            // Increment the number of functions
+                            (*num_functions)++;
                         }
                     }
                 }
@@ -88,7 +104,6 @@ void disassemble_section(Elf *elf, Elf_Scn *scn, csh handle) {
         }
     }
 }
-
 
 int main(int argc, char **argv) {
     if (argc != 2) {
@@ -124,19 +139,39 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // Allocate an array to store information about functions
+    size_t max_functions = 100;  // Adjust as needed
+    _function *functions = (_function *)malloc(max_functions * sizeof(_function));
+    size_t num_functions = 0;
+
     // Iterate over sections
     Elf_Scn *scn = NULL;
     while ((scn = elf_nextscn(elf, scn)) != NULL) {
-        disassemble_section(elf, scn, handle);
+        disassemble_section(elf, scn, handle, functions, &num_functions);
+    }
+
+    // Print details of each function
+    for (size_t i = 0; i < num_functions; i++) {
+        printf("Function Details:\n");
+        printf("\tName: %s\n", functions[i].name);
+        printf("\tStart Address: 0x%lx\n", functions[i].start_address);
+        printf("\tEnd Address: 0x%lx\n", functions[i].end_address);
+        printf("\tLength: %zu bytes\n", functions[i].length);
+        printf("\tDisassembled Code:\n");
+        // Print the disassembled code
+        for (size_t j = 0; j < functions[i].length; j++) {
+            printf("\t\t%s\t\t%s\n", functions[i].instructions[j].mnemonic, functions[i].instructions[j].op_str);
+        }
+        printf("\n");
     }
 
     // Close Capstone
     cs_close(&handle);
 
     // Clean up
+    free(functions);
     elf_end(elf);
     close(elf_fd);
 
     return 0;
 }
-
