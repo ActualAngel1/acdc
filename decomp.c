@@ -26,8 +26,13 @@ typedef struct {
 
 void make_symbols_from_funcs(_function *functions, size_t num_functions, _symbol *symbols, size_t *num_symbols) {
     for (int i = 0; i < num_functions; i++) {
-	symbols[*num_symbols] = (_symbol){.name = strdup(functions[i].name), .addr = functions[i].start_address};
-	(*num_symbols)++;
+    	if (*num_symbols < max_symbols) {
+		symbols[*num_symbols] = (_symbol){.name = strdup(functions[i].name), .addr = functions[i].start_address};
+		(*num_symbols)++;
+	} else {
+	        printf("You reached the maximum amount of symbols");
+	        return;
+	}
     }
 }
 
@@ -45,11 +50,16 @@ void get_dynamic_symbols(Elf *elf, _symbol *symbols, size_t *num_symbols) {
             printf("Dynamic Symbol Table:\n");
 
             for (size_t i = 0; i < num_syms; i++) {
-                char *sym_name = elf_strptr(elf, dynsym_shdr.sh_link, dynsym_entries[i].st_name);
-                Elf64_Addr sym_address = dynsym_entries[i].st_value;
+                if (*num_symbols < max_symbols) {
+                    char *sym_name = elf_strptr(elf, dynsym_shdr.sh_link, dynsym_entries[i].st_name);
+                    Elf64_Addr sym_address = dynsym_entries[i].st_value;
 
-		symbols[*num_symbols] = (_symbol){.name = sym_name, .addr = (uint64_t)sym_address};
-		(*num_symbols)++;
+		    symbols[*num_symbols] = (_symbol){.name = sym_name, .addr = (uint64_t)sym_address};
+		    (*num_symbols)++;
+		} else {
+		    printf("You reached the maximum amount of symbols");
+		    return;
+		}
             }
         }
     }
@@ -107,6 +117,12 @@ void disassemble_section(Elf *elf, Elf_Scn *scn, csh handle, _function *function
 
                         // Check if the address is within the section range
                         if (address >= shdr.sh_addr && address < shdr.sh_addr + shdr.sh_size) {
+
+                            if (*num_functions >= max_functions) {
+				printf("You reached the maximum amount of functions");
+				return;
+                            }
+                            
                             // Get function name from the symbol section
                             char *function_name = elf_strptr(elf, sym_shdr.sh_link, sym[i].st_name);
 
