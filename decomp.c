@@ -7,6 +7,9 @@
 #include <gelf.h>
 #include <capstone/capstone.h>
 
+#define max_functions 100
+#define max_symbols 1000
+
 // Struct to store information about a function
 typedef struct {
     char *name;
@@ -15,6 +18,42 @@ typedef struct {
     size_t length;
     cs_insn *instructions;  // Array to store disassembled instructions
 } _function;
+
+typedef struct {
+	char* name;
+	uint64_t addr;
+} _symbol;
+
+void make_symbols_from_funcs(_function *functions, size_t num_functions, _symbol *symbols, size_t *num_symbols) {
+    for (int i = 0; i < num_functions; i++) {
+	symbols[*num_symbols] = (_symbol){.name = strdup(functions[i].name), .addr = functions[i].start_address};
+	(*num_symbols)++;
+    }
+}
+
+void get_dynamic_symbols(Elf *elf, _symbol *symbols, size_t *num_symbols) {
+    Elf_Scn *dynsym_scn = NULL;
+    while ((dynsym_scn = elf_nextscn(elf, dynsym_scn)) != NULL) {
+        GElf_Shdr dynsym_shdr;
+        gelf_getshdr(dynsym_scn, &dynsym_shdr);
+
+        if (dynsym_shdr.sh_type == SHT_DYNSYM) {
+            Elf_Data *dynsym_data = elf_getdata(dynsym_scn, NULL);
+            Elf64_Sym *dynsym_entries = (Elf64_Sym *)dynsym_data->d_buf;
+            size_t num_syms = dynsym_data->d_size / sizeof(Elf64_Sym);
+
+            printf("Dynamic Symbol Table:\n");
+
+            for (size_t i = 0; i < num_syms; i++) {
+                char *sym_name = elf_strptr(elf, dynsym_shdr.sh_link, dynsym_entries[i].st_name);
+                Elf64_Addr sym_address = dynsym_entries[i].st_value;
+
+		symbols[*num_symbols] = (_symbol){.name = sym_name, .addr = (uint64_t)sym_address};
+		(*num_symbols)++;
+            }
+        }
+    }
+}
 
 void disassemble_function(char *code, size_t size, uint64_t section_base, uint64_t func_offset, csh handle, Elf *elf, GElf_Shdr sym_shdr, _function *function) {
     cs_insn *insn;
@@ -142,9 +181,12 @@ int main(int argc, char **argv) {
     }
 
     // Allocate an array to store information about functions
-    size_t max_functions = 100;  // Adjust as needed
     _function *functions = (_function *)malloc(max_functions * sizeof(_function));
     size_t num_functions = 0;
+
+    _symbol *symbols = (_symbol *)malloc(max_symbols * sizeof(_symbol));
+    size_t num_symbols = 0;
+    
 
     // Iterate over sections
     Elf_Scn *scn = NULL;
@@ -165,13 +207,22 @@ int main(int argc, char **argv) {
             printf("\t\t%s\t\t%s\n", functions[i].instructions[j].mnemonic, functions[i].instructions[j].op_str);
         }
         printf("\n");
-    }
+   }
 
+   make_symbols_from_funcs(functions, num_functions, symbols, &num_symbols);
+
+   get_dynamic_symbols(elf, symbols, &num_symbols);
+
+   for (size_t i = 0; i < num_symbols; i++) {
+        printf("Symbol: %s\tAddress: 0x%lx\n", symbols[i].name, symbols[i].addr);
+   }
+  
     // Close Capstone
     cs_close(&handle);
 
     // Clean up
     free(functions);
+    free(symbols);
     elf_end(elf);
     close(elf_fd);
 
