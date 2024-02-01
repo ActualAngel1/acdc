@@ -36,6 +36,42 @@ void disassemble_function(char *code, size_t size, uint64_t section_base, uint64
 void iterate_symbols(Elf *elf, Elf_Scn *sym_scn, Function *functions, size_t *num_functions, const GElf_Shdr *sym_shdr, const GElf_Shdr *shdr, char *section_code, csh handle);
 void disassemble_section(Elf *elf, Elf_Scn *scn, csh handle, Function *functions, size_t *num_functions);
 
+void link_dynamic_symbols_to_plt(Elf *elf, Symbol *symbols, size_t *num_symbols) {
+    Elf_Scn *plt_sec_scn = NULL;
+    Elf64_Ehdr *ehdr = elf64_getehdr(elf);
+
+    if (ehdr == NULL) {
+        fprintf(stderr, "Failed to get ELF header\n");
+        return;
+    }
+
+    size_t shstrndx;
+    if (elf_getshdrstrndx(elf, &shstrndx) != 0) {
+        fprintf(stderr, "Failed to get section header string index\n");
+        return;
+    }
+
+    while ((plt_sec_scn = elf_nextscn(elf, plt_sec_scn)) != NULL) {
+        GElf_Shdr plt_sec_shdr;
+        gelf_getshdr(plt_sec_scn, &plt_sec_shdr);
+
+        const char *section_name = elf_strptr(elf, shstrndx, plt_sec_shdr.sh_name);
+
+        if (section_name != NULL && strcmp(section_name, ".plt.sec") == 0) {
+            for(int i = 0; i < *num_symbols; i++) {
+                if (i*0x10 > plt_sec_shdr.sh_size) break;
+
+                symbols[i].addr = plt_sec_shdr.sh_addr + i*0x10;
+                symbols[i].end_addr = plt_sec_shdr.sh_addr + i*0x10 + 0x10;
+            }
+
+            return;
+        }
+    }
+
+    printf("PLT.sec Section not found in the ELF file.\n");
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <elf_file>\n", argv[0]);
@@ -88,6 +124,8 @@ int main(int argc, char **argv) {
 
     // Get dynamic symbols
     get_dynamic_symbols(elf, symbols, &num_symbols);
+
+    link_dynamic_symbols_to_plt(elf, symbols, &num_symbols);
 
     // Make symbols from functions
     make_symbols_from_functions(functions, num_functions, symbols, &num_symbols);
@@ -169,7 +207,7 @@ void get_dynamic_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols) {
         gelf_getshdr(dynsym_scn, &dynsym_shdr);
 
         if (dynsym_shdr.sh_type != SHT_DYNSYM) continue;
-        
+
         Elf_Data *dynsym_data = elf_getdata(dynsym_scn, NULL);
         Elf64_Sym *dynsym_entries = (Elf64_Sym *)dynsym_data->d_buf;
         size_t num_syms = dynsym_data->d_size / sizeof(Elf64_Sym);
@@ -181,24 +219,27 @@ void get_dynamic_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols) {
                 printf("You reached the maximum amount of symbols\n");
                 return;
             }
-            
-        char *sym_name = elf_strptr(elf, dynsym_shdr.sh_link, dynsym_entries[i].st_name);
-        
-        // Skip symbols with NULL names
-        if (sym_name[0] == '\0') {
-            printf("Skipped symbol with NULL name at index %zu\n", i);
-            continue;
-        }
-        
-	    Elf64_Addr sym_address = dynsym_entries[i].st_value;
 
-            symbols[*num_symbols] = (Symbol) {
-                			 .name = strdup(sym_name),
-                			 .addr = (uint64_t)sym_address,
-                 			 .end_addr = (uint64_t)(sym_address + dynsym_entries[i].st_size)
-                 			 };
-                	
-           (*num_symbols)++;
+            char *sym_name = elf_strptr(elf, dynsym_shdr.sh_link, dynsym_entries[i].st_name);
+
+            // Skip symbols with NULL names
+            if (sym_name[0] == '\0') {
+                printf("Skipped symbol with NULL name at index %zu\n", i);
+                continue;
+            }
+
+            // Check if the symbol type is a function
+            if (ELF64_ST_TYPE(dynsym_entries[i].st_info) == STT_FUNC) {
+                Elf64_Addr sym_address = dynsym_entries[i].st_value;
+
+                symbols[*num_symbols] = (Symbol) {
+                    .name = strdup(sym_name),
+                    .addr = (uint64_t)sym_address,
+                    .end_addr = (uint64_t)(sym_address + dynsym_entries[i].st_size)
+                };
+
+                (*num_symbols)++;
+            }
         }
     }
 }
