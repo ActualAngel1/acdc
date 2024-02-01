@@ -86,11 +86,11 @@ int main(int argc, char **argv) {
     // Print details of each function
     print_function_details(functions, num_functions);
 
-    // Make symbols from functions
-    make_symbols_from_functions(functions, num_functions, symbols, &num_symbols);
-
     // Get dynamic symbols
     get_dynamic_symbols(elf, symbols, &num_symbols);
+
+    // Make symbols from functions
+    make_symbols_from_functions(functions, num_functions, symbols, &num_symbols);
 
     // Print symbols
     for (size_t i = 0; i < num_symbols; i++) {
@@ -150,8 +150,8 @@ void make_symbols_from_functions(Function *functions, size_t num_functions, Symb
     for (size_t i = 0; i < num_functions; i++) {
         if (*num_symbols < MAX_SYMBOLS) {
             symbols[*num_symbols] = (Symbol) {
-            				     .name = strdup(functions[i].name),
-            				     .addr = functions[i].start_address,
+            				     .name     = strdup(functions[i].name),
+            				     .addr     = functions[i].start_address,
             				     .end_addr = functions[i].end_address
             				     };
             (*num_symbols)++;
@@ -182,7 +182,14 @@ void get_dynamic_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols) {
                 return;
             }
             
-            char *sym_name = elf_strptr(elf, dynsym_shdr.sh_link, dynsym_entries[i].st_name);
+        char *sym_name = elf_strptr(elf, dynsym_shdr.sh_link, dynsym_entries[i].st_name);
+        
+        // Skip symbols with NULL names
+        if (sym_name[0] == '\0') {
+            printf("Skipped symbol with NULL name at index %zu\n", i);
+            continue;
+        }
+        
 	    Elf64_Addr sym_address = dynsym_entries[i].st_value;
 
             symbols[*num_symbols] = (Symbol) {
