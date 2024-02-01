@@ -22,6 +22,7 @@ typedef struct {
 typedef struct {
     char *name;
     uint64_t addr;
+    uint64_t end_addr; // Symbols have a start and size fields, so this just adds the two.
 } Symbol;
 
 // Function prototypes
@@ -93,7 +94,7 @@ int main(int argc, char **argv) {
 
     // Print symbols
     for (size_t i = 0; i < num_symbols; i++) {
-        printf("Symbol: %s\tAddress: 0x%lx\n", symbols[i].name, symbols[i].addr);
+        printf("Symbol: %s\tStart Address: 0x%lx\tEnd Address: 0x%lx\n", symbols[i].name, symbols[i].addr, symbols[i].end_addr);
     }
 
     // Close Capstone
@@ -148,7 +149,11 @@ void print_disassembled_code(Function *function) {
 void make_symbols_from_functions(Function *functions, size_t num_functions, Symbol *symbols, size_t *num_symbols) {
     for (size_t i = 0; i < num_functions; i++) {
         if (*num_symbols < MAX_SYMBOLS) {
-            symbols[*num_symbols] = (Symbol){.name = strdup(functions[i].name), .addr = functions[i].start_address};
+            symbols[*num_symbols] = (Symbol) {
+            				     .name = strdup(functions[i].name),
+            				     .addr = functions[i].start_address,
+            				     .end_addr = functions[i].end_address
+            				     };
             (*num_symbols)++;
         } else {
             printf("You reached the maximum amount of symbols\n");
@@ -163,24 +168,30 @@ void get_dynamic_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols) {
         GElf_Shdr dynsym_shdr;
         gelf_getshdr(dynsym_scn, &dynsym_shdr);
 
-        if (dynsym_shdr.sh_type == SHT_DYNSYM) {
-            Elf_Data *dynsym_data = elf_getdata(dynsym_scn, NULL);
-            Elf64_Sym *dynsym_entries = (Elf64_Sym *)dynsym_data->d_buf;
-            size_t num_syms = dynsym_data->d_size / sizeof(Elf64_Sym);
+        if (dynsym_shdr.sh_type != SHT_DYNSYM) continue;
+        
+        Elf_Data *dynsym_data = elf_getdata(dynsym_scn, NULL);
+        Elf64_Sym *dynsym_entries = (Elf64_Sym *)dynsym_data->d_buf;
+        size_t num_syms = dynsym_data->d_size / sizeof(Elf64_Sym);
 
-            printf("Dynamic Symbol Table:\n");
+        printf("Dynamic Symbol Table:\n");
 
-            for (size_t i = 0; i < num_syms; i++) {
-                if (*num_symbols >= MAX_SYMBOLS) {
-                    printf("You reached the maximum amount of symbols\n");
-                    return;
-                }
-                char *sym_name = elf_strptr(elf, dynsym_shdr.sh_link, dynsym_entries[i].st_name);
-                Elf64_Addr sym_address = dynsym_entries[i].st_value;
-
-                symbols[*num_symbols] = (Symbol){.name = strdup(sym_name), .addr = (uint64_t)sym_address};
-                (*num_symbols)++;
+        for (size_t i = 0; i < num_syms; i++) {
+            if (*num_symbols >= MAX_SYMBOLS) {
+                printf("You reached the maximum amount of symbols\n");
+                return;
             }
+            
+            char *sym_name = elf_strptr(elf, dynsym_shdr.sh_link, dynsym_entries[i].st_name);
+	    Elf64_Addr sym_address = dynsym_entries[i].st_value;
+
+            symbols[*num_symbols] = (Symbol) {
+                			 .name = strdup(sym_name),
+                			 .addr = (uint64_t)sym_address,
+                 			 .end_addr = (uint64_t)(sym_address + dynsym_entries[i].st_size)
+                 			 };
+                	
+           (*num_symbols)++;
         }
     }
 }
