@@ -25,6 +25,7 @@ typedef struct {
     uint64_t end_addr; // Symbols have a start and size fields, so this just adds the two.
 } Symbol;
 
+
 // Function prototypes
 void cleanup_functions(Function *functions, size_t num_functions);
 void cleanup_symbols(Symbol *symbols, size_t num_symbols);
@@ -57,16 +58,18 @@ void link_dynamic_symbols_to_plt(Elf *elf, Symbol *symbols, size_t *num_symbols)
 
         const char *section_name = elf_strptr(elf, shstrndx, plt_sec_shdr.sh_name);
 
-        if (section_name != NULL && strcmp(section_name, ".plt.sec") == 0) {
-            for(int i = 0; i < *num_symbols; i++) {
-                if (i*0x10 > plt_sec_shdr.sh_size) break;
+        // if we are not in a plt section we skip section ig??
+        if (section_name == NULL || strcmp(section_name, ".plt.sec")) continue;
+        
+        for(int i = 0; i < *num_symbols; i++) {
+            if (i*0x10 > plt_sec_shdr.sh_size) break;
 
-                symbols[i].addr = plt_sec_shdr.sh_addr + i*0x10;
-                symbols[i].end_addr = plt_sec_shdr.sh_addr + i*0x10 + 0x10;
-            }
-
-            return;
+            symbols[i].addr = plt_sec_shdr.sh_addr + i*0x10;
+            symbols[i].end_addr = plt_sec_shdr.sh_addr + i*0x10 + 0x10;
         }
+
+        return;
+        
     }
 
     printf("PLT.sec Section not found in the ELF file.\n");
@@ -186,17 +189,18 @@ void print_disassembled_code(Function *function) {
 
 void make_symbols_from_functions(Function *functions, size_t num_functions, Symbol *symbols, size_t *num_symbols) {
     for (size_t i = 0; i < num_functions; i++) {
-        if (*num_symbols < MAX_SYMBOLS) {
-            symbols[*num_symbols] = (Symbol) {
-            				     .name     = strdup(functions[i].name),
-            				     .addr     = functions[i].start_address,
-            				     .end_addr = functions[i].end_address
-            				     };
-            (*num_symbols)++;
-        } else {
+        if (*num_symbols >= MAX_SYMBOLS) {
             printf("You reached the maximum amount of symbols\n");
             return;
         }
+
+        symbols[*num_symbols] = (Symbol) {
+                                .name     = strdup(functions[i].name),
+                                .addr     = functions[i].start_address,
+                                .end_addr = functions[i].end_address
+                                };
+        (*num_symbols)++;
+
     }
 }
 
@@ -229,17 +233,18 @@ void get_dynamic_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols) {
             }
 
             // Check if the symbol type is a function
-            if (ELF64_ST_TYPE(dynsym_entries[i].st_info) == STT_FUNC) {
-                Elf64_Addr sym_address = dynsym_entries[i].st_value;
+            if (ELF64_ST_TYPE(dynsym_entries[i].st_info) != STT_FUNC) continue;
+            
+            Elf64_Addr sym_address = dynsym_entries[i].st_value;
 
-                symbols[*num_symbols] = (Symbol) {
-                    .name = strdup(sym_name),
-                    .addr = (uint64_t)sym_address,
-                    .end_addr = (uint64_t)(sym_address + dynsym_entries[i].st_size)
-                };
+            symbols[*num_symbols] = (Symbol) {
+                .name = strdup(sym_name),
+                .addr = (uint64_t)sym_address,
+                .end_addr = (uint64_t)(sym_address + dynsym_entries[i].st_size)
+            };
 
-                (*num_symbols)++;
-            }
+            (*num_symbols)++;
+        
         }
     }
 }
@@ -249,15 +254,15 @@ void disassemble_function(char *code, size_t size, uint64_t section_base, uint64
     size_t count;
 
     count = cs_disasm(handle, code, size, section_base + func_offset, 0, &insn);
-    if (count > 0) {
-        // Save function details in the struct
-        function->start_address = section_base + func_offset;  // Use sh_addr of the section
-        function->end_address = section_base + func_offset + size;  // Correct calculation for end address
-        function->length = count;
-        function->instructions = insn;
-    } else {
+    if (count <= 0) {
         fprintf(stderr, "Failed to disassemble the function\n");
     }
+    // Save function details in the struct
+    function->start_address = section_base + func_offset;  // Use sh_addr of the section
+    function->end_address = section_base + func_offset + size;  // Correct calculation for end address
+    function->length = count;
+    function->instructions = insn;
+
 }
 
 void iterate_symbols(Elf *elf, Elf_Scn *sym_scn, Function *functions, size_t *num_functions, const GElf_Shdr *sym_shdr, const GElf_Shdr *shdr, char *section_code, csh handle) {
@@ -266,53 +271,52 @@ void iterate_symbols(Elf *elf, Elf_Scn *sym_scn, Function *functions, size_t *nu
     size_t nsyms = symdata->d_size / sizeof(Elf64_Sym);
 
     for (size_t i = 0; i < nsyms; i++) {
-        if (ELF64_ST_TYPE(sym[i].st_info) == STT_FUNC) {
-            uint64_t address = sym[i].st_value;
+        if (ELF64_ST_TYPE(sym[i].st_info) != STT_FUNC) continue;
+        uint64_t address = sym[i].st_value;
 
-            // Check if the address is within the section range
-            if (address >= shdr->sh_addr && address < shdr->sh_addr + shdr->sh_size) {
+        // Check if the address is within the section range
+        if (address < shdr->sh_addr || address >= shdr->sh_addr + shdr->sh_size) continue;
 
-		
-                if (*num_functions >= MAX_FUNCTIONS) {
-                    printf("You reached the maximum amount of functions\n");
-                    return;
-                }
-
-                // Get function name from the symbol section
-                char *function_name = elf_strptr(elf, sym_shdr->sh_link, sym[i].st_name);
-
-                // Skip disassembling specific functions
-                if (strcmp(function_name, "deregister_tm_clones") == 0 ||
-                    strcmp(function_name, "register_tm_clones") == 0 ||
-                    strcmp(function_name, "__do_global_dtors_aux") == 0 ||
-                    strcmp(function_name, "frame_dummy") == 0 ||
-                    strcmp(function_name, "_term_proc") == 0 ||
-                    strcmp(function_name, "_init") == 0 ||
-                    strcmp(function_name, "_fini") == 0 ) {
-                    continue;
-                }
-
-                printf("Function: %s\n", function_name);
-                printf("Offset: %lx\n", address);
-
-                // Get the offset and size for the current function
-                Elf64_Addr func_offset = sym[i].st_value - shdr->sh_addr;
-                size_t func_size = sym[i].st_size;
-
-                // Allocate a separate buffer for the current function's code
-                char *func_code = section_code + func_offset;
-
-                // Create a function struct to store information
-                Function *function = &functions[*num_functions];
-                function->name = function_name;
-                function->instructions = NULL;  // This will be set in disassemble_function
-
-                disassemble_function(func_code, func_size, shdr->sh_addr, func_offset, handle, elf, *sym_shdr, function);
-
-                // Increment the number of functions
-                (*num_functions)++;
-            }
+    
+        if (*num_functions >= MAX_FUNCTIONS) {
+            printf("You reached the maximum amount of functions\n");
+            return;
         }
+
+        // Get function name from the symbol section
+        char *function_name = elf_strptr(elf, sym_shdr->sh_link, sym[i].st_name);
+
+        // Skip disassembling specific functions
+        if (strcmp(function_name, "deregister_tm_clones") == 0 ||
+            strcmp(function_name, "register_tm_clones") == 0 ||
+            strcmp(function_name, "__do_global_dtors_aux") == 0 ||
+            strcmp(function_name, "frame_dummy") == 0 ||
+            strcmp(function_name, "_term_proc") == 0 ||
+            strcmp(function_name, "_init") == 0 ||
+            strcmp(function_name, "_fini") == 0 ) {
+            continue;
+        }
+
+        printf("Function: %s\n", function_name);
+        printf("Offset: %lx\n", address);
+
+        // Get the offset and size for the current function
+        Elf64_Addr func_offset = sym[i].st_value - shdr->sh_addr;
+        size_t func_size = sym[i].st_size;
+
+        // Allocate a separate buffer for the current function's code
+        char *func_code = section_code + func_offset;
+
+        // Create a function struct to store information
+        Function *function = &functions[*num_functions];
+        function->name = function_name;
+        function->instructions = NULL;  // This will be set in disassemble_function
+
+        disassemble_function(func_code, func_size, shdr->sh_addr, func_offset, handle, elf, *sym_shdr, function);
+
+        // Increment the number of functions
+        (*num_functions)++;
+        
     }
 }
 
@@ -323,27 +327,29 @@ void disassemble_section(Elf *elf, Elf_Scn *scn, csh handle, Function *functions
     GElf_Shdr shdr;
     gelf_getshdr(scn, &shdr);
 
-    if (shdr.sh_type == SHT_PROGBITS && (shdr.sh_flags & SHF_EXECINSTR)) {
-        Elf_Data *data = elf_getdata(scn, NULL);
-        char *section_code = (char *)data->d_buf;
-        size_t section_size = data->d_size;
+    // you can switch x and y to (not x) or (not y)
+    if (shdr.sh_type != SHT_PROGBITS || !(shdr.sh_flags & SHF_EXECINSTR)) return;
+    
+    Elf_Data *data = elf_getdata(scn, NULL);
+    char *section_code = (char *)data->d_buf;
+    size_t section_size = data->d_size;
 
-        // Get section name
-        Elf_Scn *str_scn = elf_getscn(elf, ehdr.e_shstrndx);
-        Elf_Data *str_data = elf_getdata(str_scn, NULL);
-        char *section_name = (char *)(str_data->d_buf + shdr.sh_name);
+    // Get section name
+    Elf_Scn *str_scn = elf_getscn(elf, ehdr.e_shstrndx);
+    Elf_Data *str_data = elf_getdata(str_scn, NULL);
+    char *section_name = (char *)(str_data->d_buf + shdr.sh_name);
 
-        printf("Disassembly for section '%s':\n", section_name);
+    printf("Disassembly for section '%s':\n", section_name);
 
-        // Iterate over symbols
-        Elf_Scn *sym_scn = NULL;
-        while ((sym_scn = elf_nextscn(elf, sym_scn)) != NULL) {
-            GElf_Shdr sym_shdr;
-            gelf_getshdr(sym_scn, &sym_shdr);
+    // Iterate over symbols
+    Elf_Scn *sym_scn = NULL;
+    while ((sym_scn = elf_nextscn(elf, sym_scn)) != NULL) {
+        GElf_Shdr sym_shdr;
+        gelf_getshdr(sym_scn, &sym_shdr);
 
-            if (sym_shdr.sh_type == SHT_SYMTAB) {
-                iterate_symbols(elf, sym_scn, functions, num_functions, &sym_shdr, &shdr, section_code, handle);
-            }
+        if (sym_shdr.sh_type == SHT_SYMTAB) {
+            iterate_symbols(elf, sym_scn, functions, num_functions, &sym_shdr, &shdr, section_code, handle);
         }
     }
+    
 }
