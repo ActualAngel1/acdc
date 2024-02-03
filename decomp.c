@@ -6,6 +6,7 @@
 #include <libelf.h>
 #include <gelf.h>
 #include <capstone/capstone.h>
+#include <stdbool.h>
 
 #define MAX_FUNCTIONS 100
 #define MAX_SYMBOLS 1000
@@ -37,19 +38,19 @@ void disassemble_function(char *code, size_t size, uint64_t section_base, uint64
 void iterate_symbols(Elf *elf, Elf_Scn *sym_scn, Function *functions, size_t *num_functions, const GElf_Shdr *sym_shdr, const GElf_Shdr *shdr, char *section_code, csh handle);
 void disassemble_section(Elf *elf, Elf_Scn *scn, csh handle, Function *functions, size_t *num_functions);
 
-void link_dynamic_symbols_to_plt(Elf *elf, Symbol *symbols, size_t *num_symbols) {
+bool link_dynamic_symbols_to_section(Elf *elf, Symbol *symbols, size_t *num_symbols, char *section_looked_for) {
     Elf_Scn *plt_sec_scn = NULL;
     Elf64_Ehdr *ehdr = elf64_getehdr(elf);
 
     if (ehdr == NULL) {
         fprintf(stderr, "Failed to get ELF header\n");
-        return;
+        return false;
     }
 
     size_t shstrndx;
     if (elf_getshdrstrndx(elf, &shstrndx) != 0) {
         fprintf(stderr, "Failed to get section header string index\n");
-        return;
+        return false;
     }
 
     while ((plt_sec_scn = elf_nextscn(elf, plt_sec_scn)) != NULL) {
@@ -58,21 +59,21 @@ void link_dynamic_symbols_to_plt(Elf *elf, Symbol *symbols, size_t *num_symbols)
 
         const char *section_name = elf_strptr(elf, shstrndx, plt_sec_shdr.sh_name);
 
-        // if we are not in a plt section we skip section ig??
-        if (section_name == NULL || strcmp(section_name, ".plt.sec")) continue;
+        if (section_name == NULL || strcmp(section_name, section_looked_for)) continue;
         
         for(int i = 0; i < *num_symbols; i++) {
-            if (i*0x10 > plt_sec_shdr.sh_size) break;
+            if (i*0x10 >= plt_sec_shdr.sh_size) break;
 
             symbols[i].addr = plt_sec_shdr.sh_addr + i*0x10;
             symbols[i].end_addr = plt_sec_shdr.sh_addr + i*0x10 + 0x10;
         }
 
-        return;
+        return true;
         
     }
 
     printf("PLT.sec Section not found in the ELF file.\n");
+    return false;
 }
 
 int main(int argc, char **argv) {
@@ -128,7 +129,9 @@ int main(int argc, char **argv) {
     // Get dynamic symbols
     get_dynamic_symbols(elf, symbols, &num_symbols);
 
-    link_dynamic_symbols_to_plt(elf, symbols, &num_symbols);
+    if (link_dynamic_symbols_to_section(elf, symbols, &num_symbols, ".plt.sec") == false) {
+        link_dynamic_symbols_to_section(elf, symbols, &num_symbols, ".plt");
+    }
 
     // Make symbols from functions
     make_symbols_from_functions(functions, num_functions, symbols, &num_symbols);
