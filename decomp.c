@@ -39,7 +39,21 @@ void disassemble_function(char *code, size_t size, uint64_t section_base, uint64
 void iterate_symbols(Elf *elf, Elf_Scn *sym_scn, Function *functions, size_t *num_functions, const GElf_Shdr *sym_shdr, const GElf_Shdr *shdr, char *section_code, csh handle);
 void disassemble_section(Elf *elf, Elf_Scn *scn, csh handle, Function *functions, size_t *num_functions);
 
-void print_plt_sec_operands(Elf *elf) {
+Symbol *got_entry_to_symbol(Symbol *symbols, size_t *num_symbols, int64_t got_entry) {
+    for (int i = 0; i < *num_symbols; i++) {
+        if (symbols[i].addr == got_entry) return &symbols[i];
+    }
+
+    return NULL;
+}
+
+void link_plt_entry_to_symbol(Symbol *symbols, size_t *num_symbols, int64_t plt_stub_addr, int64_t got_entry) {
+    Symbol* symbol = got_entry_to_symbol(symbols, num_symbols, got_entry);
+    symbol->addr = plt_stub_addr;
+    symbol->end_addr = plt_stub_addr + 0x10;
+}
+
+void print_plt_sec_operands(Elf *elf, Symbol *symbols, size_t *num_symbols) {
     Elf_Scn *plt_sec_scn = NULL;
     Elf64_Ehdr *ehdr = elf64_getehdr(elf);
 
@@ -74,20 +88,26 @@ void print_plt_sec_operands(Elf *elf) {
                 return;
             }
 
-            cs_insn *plt_sec_insns;
-            size_t plt_sec_count = cs_disasm(handle, plt_sec_code, plt_sec_size, plt_sec_shdr.sh_addr, 0, &plt_sec_insns);
+            cs_insn *plt_sec_insn;
+            size_t plt_sec_count = cs_disasm(handle, plt_sec_code, plt_sec_size, plt_sec_shdr.sh_addr, 0, &plt_sec_insn);
 
             // Check if the disassembly was successful
             if (plt_sec_count > 0) {
                 printf("PLT.sec Section Disassembly:\n");
-                // Print the operand of the second instruction in each stub
-                for (size_t i = 1; i < plt_sec_count; i+=3) {
-                    printf("0x%" PRIx64 ":\t%s\t%s\n", plt_sec_insns[i].address, plt_sec_insns[i].mnemonic, plt_sec_insns[i].op_str);
+                // Parse operand manually
+                for (size_t i = 1; i < plt_sec_count; i += 3) {
+                    uint64_t disp;
+                    char *op_str = plt_sec_insn[i].op_str;
+                    // Assuming the displacement is in the format [rip + displacement]
+                    if (sscanf(op_str, "qword ptr [rip + 0x%" SCNx64 "]", &disp) == 1) {
+                        printf("start: %lx, end: %lx \n", plt_sec_insn[i-1].address, plt_sec_insn[i+1].address + disp);
+                        link_plt_entry_to_symbol(symbols, num_symbols, plt_sec_insn[i-1].address, plt_sec_insn[i+1].address + disp);
+                    }
                 }
                 printf("\n");
             }
 
-            cs_free(plt_sec_insns, plt_sec_count);
+            cs_free(plt_sec_insn, plt_sec_count);
             cs_close(&handle);
         }
     }
@@ -257,17 +277,15 @@ int main(int argc, char **argv) {
         disassemble_section(elf, scn, handle, functions, &num_functions);
     }
 
-    printf("End Address of Code Section: 0x%" PRIx64 "\n", get_code_section_end(elf));
-
     // Print details of each function
     print_function_details(functions, num_functions);
 
     // Get dynamic symbols
-    get_dynamic_symbols(elf, symbols, &num_symbols);
+    // get_dynamic_symbols(elf, symbols, &num_symbols);
 
-    if (link_dynamic_symbols_to_section(elf, symbols, &num_symbols, ".plt.sec") == false) {
-        link_dynamic_symbols_to_section(elf, symbols, &num_symbols, ".plt");
-    }
+    // if (link_dynamic_symbols_to_section(elf, symbols, &num_symbols, ".plt.sec") == false) {
+    //    link_dynamic_symbols_to_section(elf, symbols, &num_symbols, ".plt");
+    //}
 
     // Make symbols from functions
     make_symbols_from_functions(functions, num_functions, symbols, &num_symbols);
@@ -275,7 +293,7 @@ int main(int argc, char **argv) {
     // After getting dynamic symbols
     get_relocation_symbols(elf, symbols, &num_symbols);
 
-    print_plt_sec_operands(elf);
+    print_plt_sec_operands(elf, symbols, &num_symbols);
 
     // Print symbols
     for (size_t i = 0; i < num_symbols; i++) {
