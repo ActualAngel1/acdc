@@ -27,6 +27,7 @@ typedef struct {
 } Symbol;
 
 
+
 // Function prototypes
 void cleanup_functions(Function *functions, size_t num_functions);
 void cleanup_symbols(Symbol *symbols, size_t num_symbols);
@@ -37,6 +38,139 @@ void get_dynamic_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols);
 void disassemble_function(char *code, size_t size, uint64_t section_base, uint64_t func_offset, csh handle, Elf *elf, GElf_Shdr sym_shdr, Function *function);
 void iterate_symbols(Elf *elf, Elf_Scn *sym_scn, Function *functions, size_t *num_functions, const GElf_Shdr *sym_shdr, const GElf_Shdr *shdr, char *section_code, csh handle);
 void disassemble_section(Elf *elf, Elf_Scn *scn, csh handle, Function *functions, size_t *num_functions);
+
+void print_plt_sec_operands(Elf *elf) {
+    Elf_Scn *plt_sec_scn = NULL;
+    Elf64_Ehdr *ehdr = elf64_getehdr(elf);
+
+    if (ehdr == NULL) {
+        fprintf(stderr, "Failed to get ELF header\n");
+        return;
+    }
+
+    size_t shstrndx;
+    if (elf_getshdrstrndx(elf, &shstrndx) != 0) {
+        fprintf(stderr, "Failed to get section header string index\n");
+        return;
+    }
+
+    // Iterate over sections to find plt.sec section
+    while ((plt_sec_scn = elf_nextscn(elf, plt_sec_scn)) != NULL) {
+        GElf_Shdr plt_sec_shdr;
+        gelf_getshdr(plt_sec_scn, &plt_sec_shdr);
+
+        const char *section_name = elf_strptr(elf, shstrndx, plt_sec_shdr.sh_name);
+
+        // Check if it's a plt.sec section
+        if (section_name != NULL && strcmp(section_name, ".plt.sec") == 0) {
+            // Disassemble the plt.sec section
+            Elf_Data *plt_sec_data = elf_getdata(plt_sec_scn, NULL);
+            char *plt_sec_code = (char *)plt_sec_data->d_buf;
+            size_t plt_sec_size = plt_sec_data->d_size;
+
+            csh handle;
+            if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK) {
+                fprintf(stderr, "Error initializing Capstone\n");
+                return;
+            }
+
+            cs_insn *plt_sec_insns;
+            size_t plt_sec_count = cs_disasm(handle, plt_sec_code, plt_sec_size, plt_sec_shdr.sh_addr, 0, &plt_sec_insns);
+
+            // Check if the disassembly was successful
+            if (plt_sec_count > 0) {
+                printf("PLT.sec Section Disassembly:\n");
+                // Print the operand of the second instruction in each stub
+                for (size_t i = 1; i < plt_sec_count; i+=3) {
+                    printf("0x%" PRIx64 ":\t%s\t%s\n", plt_sec_insns[i].address, plt_sec_insns[i].mnemonic, plt_sec_insns[i].op_str);
+                }
+                printf("\n");
+            }
+
+            cs_free(plt_sec_insns, plt_sec_count);
+            cs_close(&handle);
+        }
+    }
+}
+
+void get_relocation_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols) {
+    Elf_Scn *rela_scn = NULL;
+    while ((rela_scn = elf_nextscn(elf, rela_scn)) != NULL) {
+        GElf_Shdr rela_shdr;
+        gelf_getshdr(rela_scn, &rela_shdr);
+
+        if (rela_shdr.sh_type == SHT_RELA) {
+            Elf_Data *rela_data = elf_getdata(rela_scn, NULL);
+            Elf64_Rela *rela_entries = (Elf64_Rela *)rela_data->d_buf;
+            size_t num_relas = rela_data->d_size / sizeof(Elf64_Rela);
+
+            Elf_Scn *dynsym_scn = elf_getscn(elf, rela_shdr.sh_link);
+            Elf_Data *dynsym_data = elf_getdata(dynsym_scn, NULL);
+            Elf64_Sym *dynsym_entries = (Elf64_Sym *)dynsym_data->d_buf;
+            size_t num_dynsyms = dynsym_data->d_size / sizeof(Elf64_Sym);
+
+            Elf_Scn *strtab_scn = NULL;
+            Elf_Data *strtab_data = NULL;
+
+            // Get the index of the string table section
+            size_t shstrndx;
+            if (elf_getshdrstrndx(elf, &shstrndx) != 0) {
+                printf("Failed to get section header string index\n");
+                return;
+            }
+
+            // Retrieve the associated string table for symbol names
+            for (size_t i = 0; i < shstrndx; i++) {
+                Elf_Scn *scn = elf_getscn(elf, i);
+                GElf_Shdr shdr;
+                gelf_getshdr(scn, &shdr);
+
+                if (shdr.sh_type == SHT_STRTAB && i != rela_shdr.sh_link) {
+                    strtab_scn = scn;
+                    strtab_data = elf_getdata(strtab_scn, NULL);
+                    break;
+                }
+            }
+
+            if (strtab_scn == NULL || strtab_data == NULL) {
+                printf("String table not found for symbol names\n");
+                return;
+            }
+
+            for (size_t i = 0; i < num_relas; i++) {
+                if (*num_symbols >= MAX_SYMBOLS) {
+                    printf("You reached the maximum amount of symbols\n");
+                    return;
+                }
+
+                Elf64_Sxword sym_index = ELF64_R_SYM(rela_entries[i].r_info);
+
+                if (sym_index < 0 || (size_t)sym_index >= num_dynsyms) {
+                    printf("Invalid symbol index at entry %zu\n", i);
+                    continue;
+                }
+
+                Elf64_Sym *sym_entry = &dynsym_entries[sym_index];
+
+                // Retrieve the symbol name using the string table section
+                const char *sym_name = (const char *)(strtab_data->d_buf) + sym_entry->st_name;
+
+                if (sym_name == NULL || sym_name[0] == '\0') {
+                    printf("Skipped symbol with NULL or empty name at index %zu\n", i);
+                    continue;
+                }
+
+                symbols[*num_symbols] = (Symbol) {
+                    .name = strdup(sym_name),
+                    .addr = rela_entries[i].r_offset,
+                    .end_addr = rela_entries[i].r_offset, 
+                };
+
+                (*num_symbols)++;
+            }
+        }
+    }
+}
 
 bool link_dynamic_symbols_to_section(Elf *elf, Symbol *symbols, size_t *num_symbols, char *section_looked_for) {
     Elf_Scn *plt_sec_scn = NULL;
@@ -123,6 +257,8 @@ int main(int argc, char **argv) {
         disassemble_section(elf, scn, handle, functions, &num_functions);
     }
 
+    printf("End Address of Code Section: 0x%" PRIx64 "\n", get_code_section_end(elf));
+
     // Print details of each function
     print_function_details(functions, num_functions);
 
@@ -135,6 +271,11 @@ int main(int argc, char **argv) {
 
     // Make symbols from functions
     make_symbols_from_functions(functions, num_functions, symbols, &num_symbols);
+
+    // After getting dynamic symbols
+    get_relocation_symbols(elf, symbols, &num_symbols);
+
+    print_plt_sec_operands(elf);
 
     // Print symbols
     for (size_t i = 0; i < num_symbols; i++) {
@@ -274,7 +415,7 @@ void iterate_symbols(Elf *elf, Elf_Scn *sym_scn, Function *functions, size_t *nu
     size_t nsyms = symdata->d_size / sizeof(Elf64_Sym);
 
     for (size_t i = 0; i < nsyms; i++) {
-        if (ELF64_ST_TYPE(sym[i].st_info) != STT_FUNC) continue;
+        if (ELF64_ST_TYPE(sym[i].st_info) != STT_FUNC || ELF64_ST_BIND(sym[i].st_info) == STB_WEAK) continue;
         uint64_t address = sym[i].st_value;
 
         // Check if the address is within the section range
