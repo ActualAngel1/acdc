@@ -59,6 +59,40 @@ void link_plt_entry_to_symbol(Symbol *symbols, size_t *num_symbols, int64_t plt_
     }
 }
 
+void link_regular_plt_to_symbols(Symbol *symbols, size_t *num_symbols, size_t plt_sec_count, cs_insn *plt_sec_insns, uint64_t plt_start) {
+    for (size_t i = 1; i < plt_sec_count; i++) {
+        if (plt_sec_insns[i].id == X86_INS_JMP) {
+            uint64_t disp;
+            char *op_str = plt_sec_insns[i].op_str;
+            // Assuming the displacement is in the format [rip + displacement]
+            if (sscanf(op_str, "qword ptr [rip + 0x%" SCNx64 "]", &disp) == 1) {
+                if (disp == plt_start) continue;
+                uint64_t plt_stub_addr = plt_sec_insns[i].address & (~0xf);
+                uint64_t got_entry = plt_sec_insns[i+1].address + disp;
+                printf("start: %lx, got: %lx \n", plt_stub_addr, got_entry);
+                link_plt_entry_to_symbol(symbols, num_symbols, plt_stub_addr, got_entry);
+            }
+
+        }
+    }
+
+    printf("\n");
+}
+
+void link_plt_sec_to_symbols(Symbol *symbols, size_t *num_symbols, size_t plt_sec_count, cs_insn *plt_sec_insn) {
+    // Parse operand manually
+    for (size_t i = 1; i < plt_sec_count; i += 3) {
+        uint64_t disp;
+        char *op_str = plt_sec_insn[i].op_str;
+        // Assuming the displacement is in the format [rip + displacement]
+        if (sscanf(op_str, "qword ptr [rip + 0x%" SCNx64 "]", &disp) == 1) {
+            printf("start: %lx, got: %lx \n", plt_sec_insn[i-1].address, plt_sec_insn[i+1].address + disp);
+            link_plt_entry_to_symbol(symbols, num_symbols, plt_sec_insn[i-1].address, plt_sec_insn[i+1].address + disp);
+        }
+    }
+    printf("\n");
+}
+
 void link_plt_to_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols) {
     Elf_Scn *plt_sec_scn = NULL;
     Elf64_Ehdr *ehdr = elf64_getehdr(elf);
@@ -74,17 +108,18 @@ void link_plt_to_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols) {
         return;
     }
 
-    // Iterate over sections to find plt.sec section
+    // Iterate over sections to find plt sections
     while ((plt_sec_scn = elf_nextscn(elf, plt_sec_scn)) != NULL) {
         GElf_Shdr plt_sec_shdr;
         gelf_getshdr(plt_sec_scn, &plt_sec_shdr);
 
         const char *section_name = elf_strptr(elf, shstrndx, plt_sec_shdr.sh_name);
 
-        // Check if it's a plt.sec section
+        // Check if it's a plt section
         if (section_name != NULL && (strcmp(section_name, ".plt.sec") == 0)
-                                        || strcmp(section_name, ".plt.got") == 0) {
-            // Disassemble the plt.sec section
+                                        || strcmp(section_name, ".plt.got") == 0 
+                                        || strcmp(section_name, ".plt") == 0) {
+            // Disassemble the plt section
             Elf_Data *plt_sec_data = elf_getdata(plt_sec_scn, NULL);
             char *plt_sec_code = (char *)plt_sec_data->d_buf;
             size_t plt_sec_size = plt_sec_data->d_size;
@@ -101,17 +136,13 @@ void link_plt_to_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols) {
             // Check if the disassembly was successful
             if (plt_sec_count > 0) {
                 printf("%s Section Disassembly:\n", section_name);
-                // Parse operand manually
-                for (size_t i = 1; i < plt_sec_count; i += 3) {
-                    uint64_t disp;
-                    char *op_str = plt_sec_insn[i].op_str;
-                    // Assuming the displacement is in the format [rip + displacement]
-                    if (sscanf(op_str, "qword ptr [rip + 0x%" SCNx64 "]", &disp) == 1) {
-                        printf("start: %lx, got: %lx \n", plt_sec_insn[i-1].address, plt_sec_insn[i+1].address + disp);
-                        link_plt_entry_to_symbol(symbols, num_symbols, plt_sec_insn[i-1].address, plt_sec_insn[i+1].address + disp);
-                    }
+                // .plt.sec and .plt.got can be treated as the same thing in this context
+
+                if ((strcmp(section_name, ".plt.sec") == 0) || strcmp(section_name, ".plt.got") == 0) {
+                    link_plt_sec_to_symbols(symbols, num_symbols, plt_sec_count, plt_sec_insn);
+                } else {
+                    link_regular_plt_to_symbols(symbols, num_symbols, plt_sec_count, plt_sec_insn, plt_sec_shdr.sh_addr);
                 }
-                printf("\n");
             }
 
             cs_free(plt_sec_insn, plt_sec_count);
