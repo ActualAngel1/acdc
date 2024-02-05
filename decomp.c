@@ -30,6 +30,10 @@ typedef struct {
 
 // Function prototypes
 void cleanup_functions(Function *functions, size_t num_functions);
+void process_symtab_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols, GElf_Shdr *symtab_shdr, Elf_Scn *symtab_scn);
+void add_symbol_if_global_object(Symbol *symbols, size_t *num_symbols, Elf *elf, GElf_Shdr *symtab_shdr, Elf64_Sym *sym_entry);
+void update_symbol_end_address(Symbol *symbol, Elf64_Sym *sym_entry);
+void get_global_object_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols);
 void cleanup_symbols(Symbol *symbols, size_t num_symbols);
 void print_function_details(Function *functions, size_t num_functions);
 void print_disassembled_code(Function *function);
@@ -49,11 +53,13 @@ Symbol *got_entry_to_symbol(Symbol *symbols, size_t *num_symbols, int64_t got_en
 
 void link_plt_entry_to_symbol(Symbol *symbols, size_t *num_symbols, int64_t plt_stub_addr, int64_t got_entry) {
     Symbol* symbol = got_entry_to_symbol(symbols, num_symbols, got_entry);
-    symbol->addr = plt_stub_addr;
-    symbol->end_addr = plt_stub_addr + 0x10;
+    if (symbol) {
+        symbol->addr = plt_stub_addr;
+        symbol->end_addr = plt_stub_addr + 0x10;
+    }
 }
 
-void print_plt_sec_operands(Elf *elf, Symbol *symbols, size_t *num_symbols) {
+void link_plt_to_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols) {
     Elf_Scn *plt_sec_scn = NULL;
     Elf64_Ehdr *ehdr = elf64_getehdr(elf);
 
@@ -76,7 +82,8 @@ void print_plt_sec_operands(Elf *elf, Symbol *symbols, size_t *num_symbols) {
         const char *section_name = elf_strptr(elf, shstrndx, plt_sec_shdr.sh_name);
 
         // Check if it's a plt.sec section
-        if (section_name != NULL && strcmp(section_name, ".plt.sec") == 0) {
+        if (section_name != NULL && (strcmp(section_name, ".plt.sec") == 0)
+                                        || strcmp(section_name, ".plt.got") == 0) {
             // Disassemble the plt.sec section
             Elf_Data *plt_sec_data = elf_getdata(plt_sec_scn, NULL);
             char *plt_sec_code = (char *)plt_sec_data->d_buf;
@@ -93,14 +100,14 @@ void print_plt_sec_operands(Elf *elf, Symbol *symbols, size_t *num_symbols) {
 
             // Check if the disassembly was successful
             if (plt_sec_count > 0) {
-                printf("PLT.sec Section Disassembly:\n");
+                printf("%s Section Disassembly:\n", section_name);
                 // Parse operand manually
                 for (size_t i = 1; i < plt_sec_count; i += 3) {
                     uint64_t disp;
                     char *op_str = plt_sec_insn[i].op_str;
                     // Assuming the displacement is in the format [rip + displacement]
                     if (sscanf(op_str, "qword ptr [rip + 0x%" SCNx64 "]", &disp) == 1) {
-                        printf("start: %lx, end: %lx \n", plt_sec_insn[i-1].address, plt_sec_insn[i+1].address + disp);
+                        printf("start: %lx, got: %lx \n", plt_sec_insn[i-1].address, plt_sec_insn[i+1].address + disp);
                         link_plt_entry_to_symbol(symbols, num_symbols, plt_sec_insn[i-1].address, plt_sec_insn[i+1].address + disp);
                     }
                 }
@@ -192,44 +199,6 @@ void get_relocation_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols) {
     }
 }
 
-bool link_dynamic_symbols_to_section(Elf *elf, Symbol *symbols, size_t *num_symbols, char *section_looked_for) {
-    Elf_Scn *plt_sec_scn = NULL;
-    Elf64_Ehdr *ehdr = elf64_getehdr(elf);
-
-    if (ehdr == NULL) {
-        fprintf(stderr, "Failed to get ELF header\n");
-        return false;
-    }
-
-    size_t shstrndx;
-    if (elf_getshdrstrndx(elf, &shstrndx) != 0) {
-        fprintf(stderr, "Failed to get section header string index\n");
-        return false;
-    }
-
-    while ((plt_sec_scn = elf_nextscn(elf, plt_sec_scn)) != NULL) {
-        GElf_Shdr plt_sec_shdr;
-        gelf_getshdr(plt_sec_scn, &plt_sec_shdr);
-
-        const char *section_name = elf_strptr(elf, shstrndx, plt_sec_shdr.sh_name);
-
-        if (section_name == NULL || strcmp(section_name, section_looked_for)) continue;
-        
-        for(int i = 0; i < *num_symbols; i++) {
-            if (i*0x10 >= plt_sec_shdr.sh_size) break;
-
-            symbols[i].addr = plt_sec_shdr.sh_addr + i*0x10;
-            symbols[i].end_addr = plt_sec_shdr.sh_addr + i*0x10 + 0x10;
-        }
-
-        return true;
-        
-    }
-
-    printf("PLT.sec Section not found in the ELF file.\n");
-    return false;
-}
-
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <elf_file>\n", argv[0]);
@@ -280,20 +249,15 @@ int main(int argc, char **argv) {
     // Print details of each function
     print_function_details(functions, num_functions);
 
-    // Get dynamic symbols
-    // get_dynamic_symbols(elf, symbols, &num_symbols);
-
-    // if (link_dynamic_symbols_to_section(elf, symbols, &num_symbols, ".plt.sec") == false) {
-    //    link_dynamic_symbols_to_section(elf, symbols, &num_symbols, ".plt");
-    //}
-
     // Make symbols from functions
     make_symbols_from_functions(functions, num_functions, symbols, &num_symbols);
 
-    // After getting dynamic symbols
     get_relocation_symbols(elf, symbols, &num_symbols);
 
-    print_plt_sec_operands(elf, symbols, &num_symbols);
+    // Get global object symbols from symtab
+    get_global_object_symbols(elf, symbols, &num_symbols);
+
+    link_plt_to_symbols(elf, symbols, &num_symbols);
 
     // Print symbols
     for (size_t i = 0; i < num_symbols; i++) {
@@ -366,51 +330,6 @@ void make_symbols_from_functions(Function *functions, size_t num_functions, Symb
     }
 }
 
-void get_dynamic_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols) {
-    Elf_Scn *dynsym_scn = NULL;
-    while ((dynsym_scn = elf_nextscn(elf, dynsym_scn)) != NULL) {
-        GElf_Shdr dynsym_shdr;
-        gelf_getshdr(dynsym_scn, &dynsym_shdr);
-
-        if (dynsym_shdr.sh_type != SHT_DYNSYM) continue;
-
-        Elf_Data *dynsym_data = elf_getdata(dynsym_scn, NULL);
-        Elf64_Sym *dynsym_entries = (Elf64_Sym *)dynsym_data->d_buf;
-        size_t num_syms = dynsym_data->d_size / sizeof(Elf64_Sym);
-
-        printf("Dynamic Symbol Table:\n");
-
-        for (size_t i = 0; i < num_syms; i++) {
-            if (*num_symbols >= MAX_SYMBOLS) {
-                printf("You reached the maximum amount of symbols\n");
-                return;
-            }
-
-            char *sym_name = elf_strptr(elf, dynsym_shdr.sh_link, dynsym_entries[i].st_name);
-
-            // Skip symbols with NULL names
-            if (sym_name[0] == '\0') {
-                printf("Skipped symbol with NULL name at index %zu\n", i);
-                continue;
-            }
-
-            // Check if the symbol type is a function
-            if (ELF64_ST_TYPE(dynsym_entries[i].st_info) != STT_FUNC) continue;
-            
-            Elf64_Addr sym_address = dynsym_entries[i].st_value;
-
-            symbols[*num_symbols] = (Symbol) {
-                .name = strdup(sym_name),
-                .addr = (uint64_t)sym_address,
-                .end_addr = (uint64_t)(sym_address + dynsym_entries[i].st_size)
-            };
-
-            (*num_symbols)++;
-        
-        }
-    }
-}
-
 void disassemble_function(char *code, size_t size, uint64_t section_base, uint64_t func_offset, csh handle, Elf *elf, GElf_Shdr sym_shdr, Function *function) {
     cs_insn *insn;
     size_t count;
@@ -433,7 +352,7 @@ void iterate_symbols(Elf *elf, Elf_Scn *sym_scn, Function *functions, size_t *nu
     size_t nsyms = symdata->d_size / sizeof(Elf64_Sym);
 
     for (size_t i = 0; i < nsyms; i++) {
-        if (ELF64_ST_TYPE(sym[i].st_info) != STT_FUNC || ELF64_ST_BIND(sym[i].st_info) == STB_WEAK) continue;
+        if (ELF64_ST_TYPE(sym[i].st_info) != STT_FUNC) continue;
         uint64_t address = sym[i].st_value;
 
         // Check if the address is within the section range
@@ -489,7 +408,6 @@ void disassemble_section(Elf *elf, Elf_Scn *scn, csh handle, Function *functions
     GElf_Shdr shdr;
     gelf_getshdr(scn, &shdr);
 
-    // you can switch x and y to (not x) or (not y)
     if (shdr.sh_type != SHT_PROGBITS || !(shdr.sh_flags & SHF_EXECINSTR)) return;
     
     Elf_Data *data = elf_getdata(scn, NULL);
@@ -512,6 +430,57 @@ void disassemble_section(Elf *elf, Elf_Scn *scn, csh handle, Function *functions
         if (sym_shdr.sh_type == SHT_SYMTAB) {
             iterate_symbols(elf, sym_scn, functions, num_functions, &sym_shdr, &shdr, section_code, handle);
         }
+    }   
+}
+
+void get_global_object_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols) {
+    Elf_Scn *symtab_scn = NULL;
+    while ((symtab_scn = elf_nextscn(elf, symtab_scn)) != NULL) {
+        GElf_Shdr symtab_shdr;
+        gelf_getshdr(symtab_scn, &symtab_shdr);
+
+        if (symtab_shdr.sh_type == SHT_SYMTAB) {
+            process_symtab_symbols(elf, symbols, num_symbols, &symtab_shdr, symtab_scn);
+        }
     }
-    
+}
+
+void process_symtab_symbols(Elf *elf, Symbol *symbols, size_t *num_symbols, GElf_Shdr *symtab_shdr, Elf_Scn *symtab_scn) {
+    Elf_Data *symdata = elf_getdata(symtab_scn, NULL);
+    Elf64_Sym *sym_entries = (Elf64_Sym *)symdata->d_buf;
+    size_t num_syms = symdata->d_size / sizeof(Elf64_Sym);
+
+    for (size_t i = 0; i < num_syms; i++) {
+        add_symbol_if_global_object(symbols, num_symbols, elf, symtab_shdr, &sym_entries[i]);
+    }
+}
+
+void add_symbol_if_global_object(Symbol *symbols, size_t *num_symbols, Elf *elf, GElf_Shdr *symtab_shdr, Elf64_Sym *sym_entry) {
+    if (ELF64_ST_TYPE(sym_entry->st_info) == STT_OBJECT &&
+        ELF64_ST_BIND(sym_entry->st_info) == STB_GLOBAL) {
+        if (*num_symbols >= MAX_SYMBOLS) {
+            printf("You reached the maximum amount of symbols\n");
+            return;
+        }
+
+        const char *sym_name = elf_strptr(elf, symtab_shdr->sh_link, sym_entry->st_name);
+        if (sym_name == NULL || sym_name[0] == '\0') {
+            printf("Skipped symbol with NULL or empty name\n");
+            return;
+        }
+
+        symbols[*num_symbols] = (Symbol) {
+            .name = strdup(sym_name),
+            .addr = sym_entry->st_value,
+            .end_addr = 0, // Will be updated later
+        };
+
+        update_symbol_end_address(&symbols[*num_symbols], sym_entry);
+        (*num_symbols)++;
+    }
+}
+
+
+void update_symbol_end_address(Symbol *symbol, Elf64_Sym *sym_entry) {
+    symbol->end_addr = sym_entry->st_value + sym_entry->st_size;
 }
